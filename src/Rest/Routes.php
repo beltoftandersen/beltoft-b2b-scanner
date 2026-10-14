@@ -1,0 +1,475 @@
+<?php
+
+namespace B2BScanner\Rest;
+
+use B2BScanner\Catalog\ProductLookup;
+use B2BScanner\Log\Repository as Log;
+use B2BScanner\Support\Context;
+use WC_Product;
+use WP_Error;
+use WP_REST_Request;
+use WP_REST_Response;
+
+defined( 'ABSPATH' ) || exit;
+
+/**
+ * The endpoints the scanner panel talks to.
+ *
+ * Authentication is WordPress's own cookie scheme, which means every request
+ * carries X-WP-Nonce and WordPress rejects it with 403 rest_cookie_invalid_nonce
+ * if the nonce has expired. The panel watches for that and asks the partner to
+ * sign in again rather than silently dropping their scans.
+ *
+ * ON LOGGING: the brief has the panel POST unmatched codes to a log. This logs
+ * them in the lookup instead, at the moment the miss happens. It is the same
+ * record with two differences that matter: it cannot be lost when the phone
+ * goes offline between the failed lookup and the log call, and it cannot be
+ * forged or skipped by the client. The explicit "Reportar" action stays a
+ * separate call, because that one is a person saying "this is wrong", which is
+ * a different fact from "this code did not resolve".
+ */
+class Routes {
+
+	public const NAMESPACE_V1 = 'b2b/v1';
+
+	public static function register(): void {
+		add_action( 'rest_api_init', array( __CLASS__, 'routes' ) );
+	}
+
+	public static function routes(): void {
+		register_rest_route( self::NAMESPACE_V1, '/lookup', array(
+			'methods'             => 'GET',
+			'callback'            => array( __CLASS__, 'lookup' ),
+			'permission_callback' => array( __CLASS__, 'may_scan' ),
+			'args'                => array(
+				'code' => array(
+					'required'          => true,
+					'type'              => 'string',
+					'sanitize_callback' => array( __CLASS__, 'clean_code' ),
+				),
+				/*
+				 * One round trip per scan.
+				 *
+				 * Resolving the code, adding the unit and reading the order back
+				 * used to be three requests, about a second and a half on a
+				 * phone. Someone working along a shelf feels every one of those,
+				 * and thirty boxes is most of a minute spent watching a
+				 * spinner. With add=1 a scan is a single call that answers with
+				 * the whole order.
+				 */
+				'add'  => array(
+					'required' => false,
+					'type'     => 'boolean',
+					'default'  => false,
+				),
+			),
+		) );
+
+		register_rest_route( self::NAMESPACE_V1, '/report', array(
+			'methods'             => 'POST',
+			'callback'            => array( __CLASS__, 'report' ),
+			'permission_callback' => array( __CLASS__, 'may_scan' ),
+			'args'                => array(
+				'code' => array(
+					'required'          => true,
+					'type'              => 'string',
+					'sanitize_callback' => array( __CLASS__, 'clean_code' ),
+				),
+			),
+		) );
+
+		/*
+		 * Scanning changes the order, so it goes through the cart rather than
+		 * through the page.
+		 *
+		 * The ordering list is a paginated catalogue view - twenty-four products
+		 * behind filters - so a scanned box is very often not on screen, and
+		 * "find its row and type in it" has nowhere to type. The order actually
+		 * being assembled is the cart beside the list, which is server-side.
+		 * Adding there means a scan survives a page change, two phones on the
+		 * same account merge instead of overwriting, and the undo below is a
+		 * real decrement rather than an attempt to remember what a form field
+		 * used to say. The row's quantity on screen is kept in step when the row
+		 * happens to be visible.
+		 */
+		register_rest_route( self::NAMESPACE_V1, '/cart', array(
+			array(
+				'methods'             => 'GET',
+				'callback'            => array( __CLASS__, 'cart_contents' ),
+				'permission_callback' => array( __CLASS__, 'may_scan' ),
+			),
+			array(
+			'methods'             => 'POST',
+			'callback'            => array( __CLASS__, 'cart' ),
+			'permission_callback' => array( __CLASS__, 'may_scan' ),
+			'args'                => array(
+				'product_id' => array( 'required' => true, 'type' => 'integer' ),
+				'delta'      => array( 'required' => false, 'type' => 'integer', 'default' => 1 ),
+				'set'        => array( 'required' => false, 'type' => 'integer' ),
+			),
+			),
+		) );
+
+		register_rest_route( self::NAMESPACE_V1, '/notify', array(
+			'methods'             => 'POST',
+			'callback'            => array( __CLASS__, 'notify' ),
+			'permission_callback' => array( __CLASS__, 'may_scan' ),
+			'args'                => array(
+				'product_id' => array( 'required' => true, 'type' => 'integer' ),
+				'quantity'   => array( 'required' => false, 'type' => 'integer', 'default' => 1 ),
+			),
+		) );
+	}
+
+	/**
+	 * A barcode as the camera read it: digits only, and short enough that a
+	 * misread cannot become a long LIKE-shaped string in the log.
+	 */
+	public static function clean_code( $value ): string {
+		return substr( preg_replace( '/[^0-9A-Za-z\-_]/', '', (string) $value ), 0, 64 );
+	}
+
+	public static function may_scan() {
+		if ( ! is_user_logged_in() ) {
+			return new WP_Error( 'b2b_scanner_auth', __( 'Inicie sessão para continuar.', 'b2b-scanner' ), array( 'status' => 401 ) );
+		}
+
+		if ( ! Context::user_may_scan() ) {
+			return new WP_Error( 'b2b_scanner_forbidden', __( 'A sua conta não tem acesso ao catálogo de parceiros.', 'b2b-scanner' ), array( 'status' => 403 ) );
+		}
+
+		return true;
+	}
+
+	public static function lookup( WP_REST_Request $request ) {
+		$code    = (string) $request->get_param( 'code' );
+		$user_id = get_current_user_id();
+		$product = ProductLookup::find( $code );
+
+		if ( ! $product instanceof WC_Product ) {
+			Log::record( $code, Log::NOT_FOUND, $user_id );
+
+			return new WP_Error(
+				'b2b_scanner_not_found',
+				/* translators: %s: the scanned barcode. */
+				sprintf( __( 'Código não encontrado: %s', 'b2b-scanner' ), $code ),
+				array( 'status' => 404, 'reason' => Log::NOT_FOUND, 'code_scanned' => $code )
+			);
+		}
+
+		$verdict = ProductLookup::assess( $product, $user_id );
+		$status  = $verdict['status'];
+
+		if ( ProductLookup::OK !== $status ) {
+			Log::record( $code, $status, $user_id, $product->get_id() );
+		}
+
+		if ( in_array( $status, array( Log::NOT_FOUND, Log::NOT_PURCHASABLE, Log::NOT_VISIBLE ), true ) ) {
+			/*
+			 * Both answer the same way on purpose. A partner who may not buy a
+			 * product should not learn it exists from a different error message,
+			 * and the two are told apart in the log, where it matters.
+			 */
+			return new WP_Error(
+				'b2b_scanner_not_found',
+				sprintf( __( 'Código não encontrado: %s', 'b2b-scanner' ), $code ),
+				array( 'status' => 404, 'reason' => $status, 'code_scanned' => $code )
+			);
+		}
+
+		$payload = array(
+			'status'      => $status,
+			'product'     => ProductLookup::payload( $product ),
+			'replacement' => $verdict['replacement'] instanceof WC_Product
+				? ProductLookup::payload( $verdict['replacement'] )
+				: null,
+		);
+
+		/*
+		 * In stock but not enough of it: the line is still allowed - the list's
+		 * own rules cap or warn - and the panel shows what is actually
+		 * available beside the input.
+		 */
+		if ( ProductLookup::OK === $status && ! $product->is_in_stock() ) {
+			$payload['status'] = 'backorder';
+		}
+
+		if ( $request->get_param( 'add' ) && in_array( $payload['status'], array( ProductLookup::OK, 'backorder' ), true ) ) {
+			$added = self::apply_delta( $product, 1, null );
+
+			if ( is_wp_error( $added ) ) {
+				return $added;
+			}
+
+			// The order itself, not just what changed - that is the whole point
+			// of doing this in one call.
+			$payload = array_merge( $payload, self::cart_state(), $added );
+		}
+
+		return new WP_REST_Response( $payload, 200 );
+	}
+
+	/**
+	 * Add to, or take back from, the cart by a delta.
+	 *
+	 * A delta rather than an absolute quantity because two scans of the same box
+	 * a second apart must be two units, and because "set it to 4" from a phone
+	 * that has been offline would quietly undo whatever was added meanwhile.
+	 */
+	public static function cart( WP_REST_Request $request ) {
+		$product_id = (int) $request->get_param( 'product_id' );
+		$delta      = (int) $request->get_param( 'delta' );
+		$product    = wc_get_product( $product_id );
+
+		if ( ! $product instanceof WC_Product ) {
+			return new WP_Error( 'b2b_scanner_bad_product', __( 'Produto inválido.', 'b2b-scanner' ), array( 'status' => 400 ) );
+		}
+
+		$verdict = ProductLookup::assess( $product, get_current_user_id() );
+
+		if ( ProductLookup::OK !== $verdict['status'] && $delta > 0 ) {
+			return new WP_Error(
+				'b2b_scanner_not_orderable',
+				__( 'Este produto não pode ser adicionado.', 'b2b-scanner' ),
+				array( 'status' => 409, 'reason' => $verdict['status'] )
+			);
+		}
+
+		/*
+		 * WooCommerce does not boot the session, the customer or the cart on an
+		 * ordinary REST request - only the Store API does - so WC()->cart is
+		 * null here until asked for. wc_load_cart() is WooCommerce's own way to
+		 * say "this request needs a cart", and without it every scan returned a
+		 * 500 while the lookup beside it worked fine.
+		 */
+		if ( ! self::ready_cart() ) {
+			return new WP_Error( 'b2b_scanner_no_cart', __( 'Carrinho indisponível.', 'b2b-scanner' ), array( 'status' => 500 ) );
+		}
+
+		$result = self::apply_delta( $product, $delta, $request->get_param( 'set' ) );
+
+		if ( is_wp_error( $result ) ) {
+			return $result;
+		}
+
+		return new WP_REST_Response( array_merge( self::cart_state(), $result ), 200 );
+	}
+
+	/**
+	 * Move a product's quantity, and say where it ended up.
+	 *
+	 * Shared by the scan path and the panel's own steppers so a tap and a beep
+	 * cannot end up obeying two different sets of rules.
+	 *
+	 * @param WC_Product $product
+	 * @param int        $delta   Relative change, used when $set is null.
+	 * @param int|null   $set     Absolute quantity, when the partner typed one.
+	 * @return array|WP_Error
+	 */
+	private static function apply_delta( WC_Product $product, int $delta, $set ) {
+		if ( ! self::ready_cart() ) {
+			return new WP_Error( 'b2b_scanner_no_cart', __( 'Carrinho indisponível.', 'b2b-scanner' ), array( 'status' => 500 ) );
+		}
+
+		$parent_id    = $product->get_parent_id();
+		$variation_id = $parent_id ? $product->get_id() : 0;
+		$product_id   = $parent_id ?: $product->get_id();
+
+		/*
+		 * Found by walking the cart rather than by generate_cart_id().
+		 *
+		 * That helper hashes the product id together with whatever
+		 * cart_item_data was attached when the line was created, and something
+		 * on this install attaches some - a line added from the ordering page
+		 * and the same line recreated here hash differently. The symptom was a
+		 * scan that always believed the cart was empty: it read zero, wrote
+		 * one, and three scans of the same box still left a quantity of one.
+		 */
+		$existing = '';
+		$current  = 0;
+
+		foreach ( WC()->cart->get_cart() as $key => $line ) {
+			if ( (int) ( $line['product_id'] ?? 0 ) === $product_id
+				&& (int) ( $line['variation_id'] ?? 0 ) === $variation_id ) {
+				$existing = $key;
+				$current  = (int) ( $line['quantity'] ?? 0 );
+				break;
+			}
+		}
+
+		$target = null === $set ? max( 0, $current + $delta ) : max( 0, (int) $set );
+
+		/*
+		 * Cap at what can actually be sold. set_quantity() does no stock
+		 * validation - only add_to_cart() does - so without this a partner
+		 * scanning the same box ten times ended up with fourteen of a product
+		 * with six on the shelf, and found out at checkout or later.
+		 */
+		$capped = false;
+		$stock  = $product->managing_stock() ? (int) $product->get_stock_quantity() : null;
+
+		if ( null !== $stock && ! $product->backorders_allowed() && $target > $stock ) {
+			$target = max( 0, $stock );
+			$capped = true;
+		}
+
+		if ( $existing ) {
+			WC()->cart->set_quantity( $existing, $target, true );
+		} elseif ( $target > 0 ) {
+			$added = WC()->cart->add_to_cart( $product_id, $target, $variation_id );
+
+			if ( ! $added ) {
+				$notices = function_exists( 'wc_get_notices' ) ? wc_get_notices( 'error' ) : array();
+				wc_clear_notices();
+
+				return new WP_Error(
+					'b2b_scanner_add_failed',
+					$notices ? wp_strip_all_tags( $notices[0]['notice'] ?? '' ) : __( 'Não foi possível adicionar este produto.', 'b2b-scanner' ),
+					array( 'status' => 409 )
+				);
+			}
+		}
+
+		return array(
+			'product_id' => $product->get_id(),
+			'quantity'   => $target,
+			'stock'      => $stock,
+			'capped'     => $capped,
+			'name'       => wp_strip_all_tags( $product->get_name() ),
+		);
+	}
+
+	/**
+	 * The whole order, as the panel draws it.
+	 *
+	 * Returned by every call that changes the cart, so the panel never has to
+	 * ask a second time for what it just did.
+	 */
+	private static function cart_state(): array {
+		$lines = array();
+
+		foreach ( WC()->cart->get_cart() as $line ) {
+			$product = $line['data'] ?? null;
+
+			if ( ! $product instanceof WC_Product ) {
+				continue;
+			}
+
+			$lines[] = array(
+				'product_id' => $product->get_id(),
+				'name'       => wp_strip_all_tags( $product->get_name() ),
+				'sku'        => $product->get_sku(),
+				'quantity'   => (int) $line['quantity'],
+				'stock'      => $product->managing_stock() ? (int) $product->get_stock_quantity() : null,
+				'line_total' => html_entity_decode( wp_strip_all_tags( wc_price( (float) ( $line['line_subtotal'] ?? 0 ) ) ) ),
+				'thumbnail'  => self::thumb( $product ),
+			);
+		}
+
+		return array(
+			// Newest first: what was just scanned should be the thing on screen.
+			'lines'    => array_reverse( $lines ),
+			'count'    => (int) WC()->cart->get_cart_contents_count(),
+			'subtotal' => html_entity_decode( wp_strip_all_tags( wc_price( (float) WC()->cart->get_subtotal() ) ) ),
+			'cartUrl'  => wc_get_checkout_url(),
+		);
+	}
+
+	/** Make sure this request has a cart that has read itself. See cart(). */
+	private static function ready_cart(): bool {
+		if ( ! WC()->cart && function_exists( 'wc_load_cart' ) ) {
+			wc_load_cart();
+		}
+
+		if ( ! WC()->cart ) {
+			return false;
+		}
+
+		WC()->cart->get_cart();
+
+		return true;
+	}
+
+	/**
+	 * What is on the order right now.
+	 *
+	 * The panel shows this rather than remembering what it scanned. A phone
+	 * that reloaded, a scan made on the shop floor an hour ago, a line added on
+	 * a laptop - all of it is already in the cart, and a list the panel keeps
+	 * for itself would disagree with the order the moment anything else touched
+	 * it.
+	 */
+	public static function cart_contents() {
+		if ( ! self::ready_cart() ) {
+			return new WP_Error( 'b2b_scanner_no_cart', __( 'Carrinho indisponível.', 'b2b-scanner' ), array( 'status' => 500 ) );
+		}
+
+		return new WP_REST_Response( self::cart_state(), 200 );
+	}
+
+	private static function thumb( WC_Product $product ): string {
+		$id = $product->get_image_id() ?: get_post_thumbnail_id( $product->get_parent_id() ?: $product->get_id() );
+
+		return $id ? (string) wp_get_attachment_image_url( $id, 'woocommerce_gallery_thumbnail' ) : '';
+	}
+
+	public static function report( WP_REST_Request $request ) {
+		$code = (string) $request->get_param( 'code' );
+
+		Log::report( $code, get_current_user_id() );
+
+		return new WP_REST_Response(
+			array( 'reported' => true, 'message' => __( 'Obrigado. Vamos verificar este código.', 'b2b-scanner' ) ),
+			200
+		);
+	}
+
+	/**
+	 * "Notificar-me" on an out-of-stock scan.
+	 *
+	 * Handed to beltoft-in-stock-notifier rather than stored here: it already
+	 * owns back-in-stock subscriptions, the email that goes out when stock
+	 * returns, the unsubscribe token and the admin screen. A second store would
+	 * mean a partner subscribing twice and being told once.
+	 */
+	public static function notify( WP_REST_Request $request ) {
+		$product_id = (int) $request->get_param( 'product_id' );
+		$product    = wc_get_product( $product_id );
+		$user       = wp_get_current_user();
+
+		if ( ! $product instanceof WC_Product ) {
+			return new WP_Error( 'b2b_scanner_bad_product', __( 'Produto inválido.', 'b2b-scanner' ), array( 'status' => 400 ) );
+		}
+
+		if ( ! class_exists( '\BeltoftInStockNotifier\Subscription\Repository' ) ) {
+			return new WP_Error(
+				'b2b_scanner_no_notifier',
+				__( 'Os avisos de reposição não estão disponíveis de momento.', 'b2b-scanner' ),
+				array( 'status' => 503 )
+			);
+		}
+
+		$parent_id    = $product->get_parent_id();
+		$variation_id = $parent_id ? $product->get_id() : 0;
+
+		$id = \BeltoftInStockNotifier\Subscription\Repository::upsert( array(
+			'product_id'        => $parent_id ?: $product->get_id(),
+			'variation_id'      => $variation_id,
+			'email'             => $user->user_email,
+			'quantity'          => max( 1, (int) $request->get_param( 'quantity' ) ),
+			'gdpr_consent'      => 1,
+			'unsubscribe_token' => wp_generate_password( 32, false ),
+		) );
+
+		return new WP_REST_Response(
+			array(
+				'subscribed' => true,
+				'already'    => 0 === $id,
+				'message'    => 0 === $id
+					? __( 'Já está a ser avisado deste produto.', 'b2b-scanner' )
+					: __( 'Avisamos assim que houver stock.', 'b2b-scanner' ),
+			),
+			200
+		);
+	}
+}

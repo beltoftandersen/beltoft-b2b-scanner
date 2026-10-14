@@ -1,0 +1,495 @@
+/**
+ * Scan to order.
+ *
+ * The palette is the trade site's, so the panel reads as part of the ordering
+ * page rather than as a widget dropped on top of it. Everything is square,
+ * because nothing else on this site is rounded.
+ */
+
+.b2bs-trigger {
+	--b2bs-ink: #264F37;
+	--b2bs-rule: #e3e8dd;
+	--b2bs-paper: #F4F6F1;
+	--b2bs-muted: #7a857d;
+
+	display: none;
+	align-items: center;
+	gap: 8px;
+	min-height: 42px;
+	padding: 0 18px;
+	border: 0;
+	background: var(--b2bs-ink);
+	color: #fff;
+	font: inherit;
+	font-size: 14px;
+	font-weight: 500;
+	text-transform: uppercase;
+	letter-spacing: .02em;
+	cursor: pointer;
+}
+
+.b2bs-trigger:hover { background: #1d3d2a; }
+
+/* Only where a camera is likely and the list has stacked: the width comes from
+   Bricks' own mobile_landscape breakpoint, passed in as --b2bs-bp. */
+@media (max-width: 767px) {
+	.b2bs-trigger { display: inline-flex; }
+}
+
+.b2bs-trigger--always { display: inline-flex; }
+
+.b2bs-trigger__icon {
+	width: 16px;
+	height: 14px;
+	border: 2px solid currentColor;
+	border-left-width: 4px;
+	border-right-width: 4px;
+	border-top: 0;
+	border-bottom: 0;
+}
+
+/* ------------------------------------------------------------------ panel */
+
+.b2bs-panel {
+	position: fixed;
+	inset: 0 0 auto 0;
+	z-index: 10000;
+	background: #10170f;
+	box-shadow: 0 8px 24px rgba(0, 0, 0, .28);
+}
+
+.b2bs-panel[hidden] { display: none; }
+
+/* The viewfinder takes the top of the screen and the order list keeps
+   scrolling underneath, which is the whole point: you scan, you glance down,
+   you carry on. */
+.b2bs-stage {
+	position: relative;
+	height: 40vh;
+	min-height: 220px;
+	overflow: hidden;
+	background: #000;
+}
+
+.b2bs-video {
+	width: 100%;
+	height: 100%;
+	object-fit: cover;
+	display: block;
+}
+
+/* A window to aim through. EAN-13 is a wide, short barcode, so the guide is
+   the shape of the thing being read rather than a square. */
+.b2bs-reticle {
+	position: absolute;
+	left: 50%;
+	top: 50%;
+	transform: translate(-50%, -50%);
+	width: min(72vw, 320px);
+	height: 96px;
+	border: 2px solid rgba(255, 255, 255, .85);
+	box-shadow: 0 0 0 100vmax rgba(0, 0, 0, .35);
+}
+
+.b2bs-stage-bar {
+	position: absolute;
+	top: 10px;
+	right: 10px;
+	display: flex;
+	gap: 8px;
+}
+
+.b2bs-icon-btn {
+	min-height: 36px;
+	padding: 0 14px;
+	border: 1px solid rgba(255, 255, 255, .5);
+	background: rgba(0, 0, 0, .45);
+	color: #fff;
+	font: inherit;
+	font-size: 13px;
+	cursor: pointer;
+}
+
+.b2bs-icon-btn.is-on {
+	background: #fff;
+	color: #10170f;
+}
+
+.b2bs-status {
+	position: absolute;
+	left: 16px;
+	right: 16px;
+	bottom: 14px;
+	margin: 0;
+	color: #fff;
+	font-size: 13px;
+	line-height: 1.45;
+	text-align: center;
+	text-shadow: 0 1px 2px rgba(0, 0, 0, .6);
+}
+
+.b2bs-external {
+	display: inline-block;
+	margin-top: 8px;
+	padding: 6px 12px;
+	background: #fff;
+	color: #10170f;
+	text-decoration: none;
+	font-weight: 500;
+}
+
+/* Always present, because a damaged barcode is common and a partner should
+   never be stuck looking at a camera that will not read it. */
+.b2bs-manual {
+	display: flex;
+	gap: 0;
+	padding: 10px;
+	background: #10170f;
+}
+
+.b2bs-manual-input {
+	flex: 1 1 auto;
+	min-width: 0;
+	height: 40px;
+	padding: 0 12px;
+	border: 1px solid #3a4a38;
+	border-right: 0;
+	background: #fff;
+	font: inherit;
+	font-size: 15px;
+	color: #1f2a23;
+}
+
+.b2bs-manual-add {
+	flex: 0 0 auto;
+	height: 40px;
+	padding: 0 18px;
+	border: 0;
+	background: #4f7a5c;
+	color: #fff;
+	font: inherit;
+	font-size: 14px;
+	font-weight: 500;
+	cursor: pointer;
+}
+
+/* The list has to clear the panel, or the first rows sit behind it. */
+body.b2bs-open { padding-top: calc(40vh + 60px); }
+
+@media (min-width: 768px) {
+	body.b2bs-open { padding-top: 0; }
+	.b2bs-panel { max-width: 420px; inset: 0 0 auto auto; }
+}
+
+/* ----------------------------------------------------------------- toasts */
+
+.b2bs-toasts {
+	position: fixed;
+	left: 12px;
+	right: 12px;
+	bottom: 12px;
+	z-index: 10001;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	pointer-events: none;
+}
+
+.b2bs-toast {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	padding: 12px 14px;
+	background: #1f2a23;
+	color: #fff;
+	font-size: 14px;
+	line-height: 1.35;
+	pointer-events: auto;
+	border-left: 3px solid #4f7a5c;
+	transition: opacity .25s, transform .25s;
+}
+
+.b2bs-toast--ok { border-left-color: #4f7a5c; }
+.b2bs-toast--warn { border-left-color: #c8922f; }
+.b2bs-toast--error { border-left-color: #a3402f; }
+.b2bs-toast--pending { border-left-color: #7a857d; }
+
+.b2bs-toast.is-going {
+	opacity: 0;
+	transform: translateY(6px);
+}
+
+.b2bs-toast__text { flex: 1 1 auto; }
+
+.b2bs-toast__action {
+	flex: 0 0 auto;
+	padding: 6px 12px;
+	border: 1px solid rgba(255, 255, 255, .5);
+	background: none;
+	color: #fff;
+	font: inherit;
+	font-size: 13px;
+	cursor: pointer;
+}
+
+.b2bs-toast__action:hover { background: rgba(255, 255, 255, .12); }
+
+/* --------------------------------------------------------- the row it hit */
+
+.b2bs-hit {
+	animation: b2bs-hit 1.1s ease-out;
+}
+
+@keyframes b2bs-hit {
+	0%   { background-color: rgba(79, 122, 92, .28); }
+	100% { background-color: transparent; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.b2bs-hit { animation: none; outline: 2px solid #4f7a5c; outline-offset: -2px; }
+	.b2bs-toast { transition: none; }
+}
+
+.screen-reader-text {
+	position: absolute !important;
+	width: 1px;
+	height: 1px;
+	overflow: hidden;
+	clip: rect(1px, 1px, 1px, 1px);
+	white-space: nowrap;
+}
+
+/* ------------------------------------------------------------- the order */
+
+/* The panel is now a sheet: camera on top, the order under it. Scanning a
+   shelf means scan, glance, correct, scan again - so what was just added has
+   to be on screen with a control on it, not behind a toast that has gone. */
+.b2bs-panel {
+	display: flex;
+	flex-direction: column;
+	max-height: 100vh;
+	max-height: 100dvh;
+	inset: 0 0 0 0;
+}
+
+.b2bs-stage {
+	flex: 0 0 auto;
+	height: 34vh;
+	min-height: 180px;
+}
+
+.b2bs-order {
+	flex: 1 1 auto;
+	min-height: 0;
+	overflow-y: auto;
+	-webkit-overflow-scrolling: touch;
+	background: #fff;
+}
+
+.b2bs-order__head {
+	position: sticky;
+	top: 0;
+	z-index: 1;
+	display: flex;
+	justify-content: space-between;
+	align-items: baseline;
+	gap: 12px;
+	padding: 10px 14px;
+	background: #F4F6F1;
+	border-bottom: 1px solid #e3e8dd;
+	font-size: 13px;
+	color: #7a857d;
+}
+
+.b2bs-order__total {
+	font-size: 15px;
+	font-weight: 600;
+	color: #264F37;
+	font-variant-numeric: tabular-nums;
+}
+
+.b2bs-lines {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+}
+
+.b2bs-line {
+	display: grid;
+	grid-template-columns: 44px 1fr auto;
+	gap: 12px;
+	align-items: start;
+	padding: 12px 14px;
+	border-bottom: 1px solid #e3e8dd;
+}
+
+.b2bs-line.is-hit { animation: b2bs-line-hit 1s ease-out; }
+
+@keyframes b2bs-line-hit {
+	0%   { background-color: rgba(79, 122, 92, .22); }
+	100% { background-color: transparent; }
+}
+
+.b2bs-line__thumb {
+	width: 44px;
+	height: 44px;
+	background: #F4F6F1;
+	border: 1px solid #e3e8dd;
+}
+
+.b2bs-line__thumb img {
+	width: 100%;
+	height: 100%;
+	object-fit: contain;
+	display: block;
+	mix-blend-mode: multiply;
+}
+
+.b2bs-line__name {
+	margin: 0 0 6px;
+	font-size: 14px;
+	line-height: 1.3;
+	color: #1f2a23;
+}
+
+.b2bs-line__note {
+	margin: 0 0 6px;
+	font-size: 12px;
+	color: #a3402f;
+}
+
+.b2bs-line__controls {
+	display: flex;
+	align-items: center;
+	gap: 0;
+}
+
+/* Every button in the panel centres its own label.
+   A <button> inherits text-align from the page, and the trade theme sets it
+   to left - so each of these drew its glyph hard against the left edge. On a
+   32px square control that reads as broken rather than as a style: the - and
+   + of the steppers were the obvious ones, but the close, torch, add and
+   toast buttons all had it.
+   The ordering list's stepper carries exactly these three declarations and
+   looks right; this is meant to be the same control and was missing them. */
+.b2bs-step,
+.b2bs-line__remove,
+.b2bs-icon-btn,
+.b2bs-manual-add,
+.b2bs-toast__action {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+}
+
+/* The same 32px square control as the ordering list and the checkout, so the
+   third place a quantity can be changed does not look like a fourth design. */
+.b2bs-step {
+	width: 32px;
+	height: 32px;
+	flex: 0 0 32px;
+	padding: 0;
+	border: 1px solid #dddedf;
+	background: transparent;
+	color: #264F37;
+	font: inherit;
+	font-size: 15px;
+	line-height: 1;
+	cursor: pointer;
+}
+
+.b2bs-line__qty {
+	width: 46px;
+	flex: 0 0 46px;
+	height: 32px;
+	padding: 0;
+	border: 1px solid #dddedf;
+	border-left: 0;
+	border-right: 0;
+	background: #fff;
+	font: inherit;
+	font-size: 15px;
+	text-align: center;
+	color: #1f2a23;
+	-moz-appearance: textfield;
+	font-variant-numeric: tabular-nums;
+}
+
+.b2bs-line__qty::-webkit-outer-spin-button,
+.b2bs-line__qty::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+
+.b2bs-line__remove {
+	margin-left: 10px;
+	width: 32px;
+	height: 32px;
+	padding: 0;
+	border: 0;
+	background: none;
+	color: #7a857d;
+	font-size: 20px;
+	line-height: 1;
+	cursor: pointer;
+}
+
+.b2bs-line__remove:hover { color: #a3402f; }
+
+.b2bs-line__total {
+	font-size: 14px;
+	font-weight: 500;
+	color: #1f2a23;
+	font-variant-numeric: tabular-nums;
+	white-space: nowrap;
+}
+
+.b2bs-empty {
+	margin: 0;
+	padding: 22px 14px;
+	color: #7a857d;
+	font-size: 14px;
+	text-align: center;
+}
+
+/* Getting out, and getting to the order, without hunting for either. */
+.b2bs-foot {
+	flex: 0 0 auto;
+	display: flex;
+	gap: 8px;
+	padding: 10px;
+	background: #fff;
+	border-top: 1px solid #e3e8dd;
+	padding-bottom: calc( 10px + env( safe-area-inset-bottom ) );
+}
+
+.b2bs-foot__go {
+	flex: 1 1 0;
+	min-height: 46px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	border: 1px solid #264F37;
+	font: inherit;
+	font-size: 14px;
+	font-weight: 500;
+	text-transform: uppercase;
+	letter-spacing: .02em;
+	text-decoration: none;
+	cursor: pointer;
+}
+
+.b2bs-foot__go { background: #264F37; color: #fff; }
+.b2bs-foot__go[hidden] { display: none; }
+
+/* The sheet covers the screen, so the page beneath must not also be pushed. */
+body.b2bs-open { padding-top: 0; overflow: hidden; }
+
+/* Toasts sit above the footer rather than on top of it. A warning about stock
+   was landing squarely over "Finalizar encomenda", so the one button a partner
+   needs at the end of a shelf could not be pressed while it was showing. */
+body.b2bs-open .b2bs-toasts {
+	bottom: calc( 78px + env( safe-area-inset-bottom ) );
+}
+
+@media (min-width: 768px) {
+	.b2bs-panel { max-width: 420px; inset: 0 0 0 auto; }
+	body.b2bs-open { overflow: auto; }
+}
