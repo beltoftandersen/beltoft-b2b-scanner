@@ -93,43 +93,36 @@ class ProductLookup {
 		return array_map( 'intval', (array) $ids );
 	}
 
+	/** Filter through which the plugins using the scanner apply their catalog rules. */
+	public const ASSESS_FILTER = 'beltoft_scanner_assess';
+
 	/**
-	 * What this partner may do with the product they just scanned.
+	 * What this user may do with the product they just scanned.
 	 *
-	 * Visibility and purchasability are asked of beltoft-commerce rather than
-	 * worked out again here. That plugin owns the product_audience taxonomy,
-	 * the fail-closed pricing and the role rules, and a second implementation
-	 * would drift from it - the failure mode being a scanner that adds a line
-	 * the catalog would never have shown.
+	 * Who may see or buy what is not the scanner's to decide: the plugin that
+	 * owns the catalog says so through ASSESS_FILTER, returning null to let the
+	 * product through or Log::NOT_VISIBLE / Log::NOT_PURCHASABLE to refuse it.
+	 * A second implementation of those rules here would drift from the real
+	 * one - the failure mode being a scanner that adds a line the catalog would
+	 * never have shown.
+	 *
+	 * NOT_VISIBLE is answered exactly like a code that matches nothing, so the
+	 * reply never reveals a catalogue this account cannot see. The log keeps
+	 * the difference, because the two need different fixes.
 	 *
 	 * @return array{status:string, replacement:?WC_Product}
 	 */
 	public static function assess( WC_Product $product, int $user_id ): array {
-		$id     = $product->get_id();
-		$parent = $product->get_parent_id() ?: $id;
-
 		$replacement = self::replacement_for( $product );
 
 		if ( $replacement instanceof WC_Product ) {
 			return array( 'status' => Log::DISCONTINUED, 'replacement' => $replacement );
 		}
 
-		if ( class_exists( '\BeltoftCommerce\Catalog\CatalogAudience' ) ) {
-			if ( ! \BeltoftCommerce\Catalog\CatalogAudience::can_view( $user_id, $parent ) ) {
-				/*
-				 * The partner is told exactly what they are told for a code that
-				 * matches nothing - the reply must not reveal a catalogue this
-				 * account cannot see. The log keeps the difference, because the
-				 * two need different fixes: a missing barcode is corrected in
-				 * Odoo, a product the trade catalogue does not include is a
-				 * product_audience term.
-				 */
-				return array( 'status' => Log::NOT_VISIBLE, 'replacement' => null );
-			}
+		$refused = apply_filters( self::ASSESS_FILTER, null, $product, $user_id );
 
-			if ( ! \BeltoftCommerce\Catalog\CatalogAudience::can_purchase( $user_id, $parent ) ) {
-				return array( 'status' => Log::NOT_PURCHASABLE, 'replacement' => null );
-			}
+		if ( in_array( $refused, array( Log::NOT_VISIBLE, Log::NOT_PURCHASABLE ), true ) ) {
+			return array( 'status' => $refused, 'replacement' => null );
 		}
 
 		if ( ! $product->is_purchasable() ) {
